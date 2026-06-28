@@ -67,6 +67,7 @@ typedef struct nxAudioVoice
     void *user_data;
 
     bool paused;
+    float volume;
     uint8_t currentBufferIndex;
     uint8_t voice_index;
 } nxAudioVoice;
@@ -84,7 +85,7 @@ bool nxAudioVoiceStart (nxAudioVoice *voice);
 bool nxAudioVoiceStop (nxAudioVoice *voice);
 bool nxAudioVoicePause (nxAudioVoice *voice);
 
-bool nxAudioVoiceSetVolume (nxAudioVoice *voice, float volume);
+bool nxAudioVoiceSetVolume (nxAudioVoice *voice, float volume); //0.0f - 1.0f
 bool nxAudioVoiceSetFilter (nxAudioVoice *voice, nxFilterType type, float cutoffHz, float q);
 
 nxAudioResult nxAudioGetLastError (void);

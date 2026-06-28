@@ -664,10 +664,21 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
     // Disable 3d
     hw_voice.hrtf_target = HRTF_NULL_HANDLE;
 
-    // Mute ALL 8 output channels by maximizing the attenuation bits
-    hw_voice.tar_vola = 0x180f180f; // FIXME: RE from retail
-    hw_voice.tar_volb = 0xFFFFFFFF;
-    hw_voice.tar_volc = 0xFFFFFFFF;
+    // Set attenuation. VOL0 is front left, VOL1 is front right.
+    hw_voice.tar_vola = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME0, 0) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME1, 0) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME6_B3_0, 0xF) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME7_B3_0, 0xF);
+
+    hw_voice.tar_volb = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLB_VOLUME6_B7_4, 0xF) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLB_VOLUME2, 0xFFF) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLB_VOLUME7_B7_4, 0x3F) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLB_VOLUME3, 0xFFF);
+
+    hw_voice.tar_volc = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLC_VOLUME6_B11_8, 0xF) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLC_VOLUME4, 0xFFF) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLC_VOLUME7_B11_8, 0xF) |
+                        APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLC_VOLUME5, 0xFFF);
 
     // Route the voice to the Front Left and Front Right mixbins. These are used for 2D voices
     hw_voice.cfg_vbin =
@@ -695,6 +706,7 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
     voice->callback = callback;
     voice->user_data = user_data;
     voice->paused = false;
+    voice->volume = 1.0f;
     memcpy(&voice->format, audio_format, sizeof(nxAudioFormat));
 
     // Now push it all to hardware.
@@ -979,6 +991,50 @@ bool nxAudioVoicePause (nxAudioVoice *voice)
         apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_PAUSE, voice_index | NV1BA0_PIO_VOICE_PAUSE_ACTION);
         voice->paused = true;
     }
+
+    return true;
+}
+
+bool nxAudioVoiceSetVolume (nxAudioVoice *voice, float volume)
+{
+    if (!voice) {
+        set_last_error(NX_AUDIO_ERR_INVALID_PARAM);
+        return false;
+    }
+
+    if (voice->volume == volume) {
+        return true;
+    }
+
+    uint32_t attenuation_hw;
+    if (volume <= 0.0f) {
+        attenuation_hw = 0xFFF; // mute
+    }
+    else if (volume > 1.0f) {
+        attenuation_hw = 0x000; // 0 dB, no attenuation
+    }
+    else {
+        const float attenuation = -20.0f * log10f(volume);
+        attenuation_hw = (uint32_t)roundf(attenuation * 64.0f);
+        if (attenuation_hw > 0xFFF) {
+            attenuation_hw = 0xFFF;
+        }
+    }
+
+    const uint16_t voice_index = voice->voice_index;
+    const uint32_t tar_vola = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME0, attenuation_hw) |
+                              APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME1, attenuation_hw) |
+                              APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME6_B3_0, 0xF) |
+                              APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME7_B3_0, 0xF);
+
+    wait_for_pio_available(4);
+    KIRQL oldIrql = KeRaiseIrqlToDpcLevel();
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice_index);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_VOLA, tar_vola);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
+    voice->volume = volume;
+    KfLowerIrql(oldIrql);
 
     return true;
 }
