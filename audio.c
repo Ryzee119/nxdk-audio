@@ -464,11 +464,12 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
         mixer->master_volume = 0x0000;
         mixer->pcm_out_volume = 0x0808; // -12dB on left and right channel
 
-        // Reset PCM and SPDIF Out
+        // Reset PCM out
         bm->pcm_out_control = AC97_BM_CR_RESET;
         while (bm->pcm_out_control & AC97_BM_CR_RESET)
             ;
 
+        // Reset SPDIF out
         bm->spdif_control = AC97_BM_CR_RESET;
         while (bm->spdif_control & AC97_BM_CR_RESET)
             ;
