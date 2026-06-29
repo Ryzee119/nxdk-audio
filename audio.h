@@ -17,13 +17,6 @@ typedef enum
 
 typedef enum
 {
-    NX_FILTER_BYPASS = 0,
-    NX_FILTER_LOWPASS,
-    NX_FILTER_HIGHPASS
-} nxFilterType;
-
-typedef enum
-{
     NX_VOICE_TYPE_2D_STREAM,
     // 3D STREAM
     // 2D AND 3D BUFFER MODE
@@ -46,17 +39,18 @@ typedef struct
 
 typedef struct
 {
-    uint32_t dummy;
+    uint32_t unused;
 } nxAudioInitParams;
 
 struct nxAudioBuffer;
 struct nxAudioVoice;
-typedef void (*nxAudioVoiceBufferCompleteCallback)(struct nxAudioVoice *voice, struct nxAudioBuffer *buffer, void *user_data);
+typedef void (*nxAudioVoiceBufferCompleteCallback)(struct nxAudioVoice *voice, struct nxAudioBuffer *buffer,
+                                                   void *user_data);
 
 typedef struct nxAudioBuffer
 {
-    void *pUserBuffer;
-    uint32_t sizeBytes;
+    void *buffer;
+    uint32_t size_bytes;
 } nxAudioBuffer;
 
 typedef struct nxAudioVoice
@@ -72,21 +66,81 @@ typedef struct nxAudioVoice
     uint8_t voice_index;
 } nxAudioVoice;
 
-bool nxAudioInit (const nxAudioInitParams *parameters);
-void nxAudioShutdown (void);
+/**
+ * @brief Initializes the audio subsystem.
+ * @param parameters Pointer to the configuration parameters for initialization.
+ * @return true if the audio subsystem was successfully initialized, false otherwise.
+ */
+bool nxAudioInit(const nxAudioInitParams *parameters);
 
-bool nxAudioBufferInitialise (nxAudioBuffer *voice, void *pUserBuffer, uint32_t sizeBytes);
-bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer);
+/**
+ * @brief Shuts down the audio subsystem and releases associated resources.
+ */
+void nxAudioShutdown(void);
 
-// Note that the callback is called from DPC context. 
-bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format, nxAudioVoiceBufferCompleteCallback callback, void *user_data);
-void nxAudioVoiceDestroy (nxAudioVoice *voice);
-bool nxAudioVoiceStart (nxAudioVoice *voice);
-bool nxAudioVoiceStop (nxAudioVoice *voice);
-bool nxAudioVoicePause (nxAudioVoice *voice);
+/**
+ * @brief Initializes an audio buffer wrapping a user-provided memory region.
+ * @param buffer Pointer to the audio buffer structure to initialize.
+ * @param user_buffer Pointer to the user-allocated memory containing the raw audio data.
+ * @param size_bytes The size of the user buffer in bytes.
+ * @return true if the buffer was successfully initialized, false otherwise.
+ */
+bool nxAudioBufferInitialise(nxAudioBuffer *buffer, void *user_buffer, uint32_t size_bytes);
 
-bool nxAudioVoiceSetVolume (nxAudioVoice *voice, float volume); //0.0f - 1.0f
-bool nxAudioVoiceSetFilter (nxAudioVoice *voice, nxFilterType type, float cutoffHz, float q);
+/**
+ * @brief Submits a prepared audio buffer to a voice's playback queue.
+ * @param voice Pointer to the audio voice.
+ * @param buffer Pointer to the initialized audio buffer to enqueue.
+ * @return true if the buffer was successfully submitted, false otherwise.
+ */
+bool nxAudioVoiceSubmitBuffer(nxAudioVoice *voice, nxAudioBuffer *buffer);
+
+/**
+ * @brief Creates and configures a new audio voice for playback.
+ * @note The provided callback is executed from a Deferred Procedure Call (DPC) context.
+ * @param voice Pointer to the voice structure to be created.
+ * @param audio_format Pointer to the format specification for this voice.
+ * @param callback Function to be invoked when a submitted buffer completes playback.
+ * @param user_data User-defined context pointer passed directly to the callback function.
+ * @return true if the voice was successfully created, false otherwise.
+ */
+bool nxAudioVoiceCreate(nxAudioVoice *voice, const nxAudioFormat *audio_format,
+                        nxAudioVoiceBufferCompleteCallback callback, void *user_data);
+
+/**
+ * @brief Destroys an audio voice and cleans up its allocated resources.
+ * @param voice Pointer to the audio voice to destroy.
+ */
+void nxAudioVoiceDestroy(nxAudioVoice *voice);
+
+/**
+ * @brief Starts or resumes playback of submitted buffers on the specified voice.
+ * @param voice Pointer to the audio voice to start.
+ * @return true if playback was successfully started, false otherwise.
+ */
+bool nxAudioVoiceStart(nxAudioVoice *voice);
+
+/**
+ * @brief Stops playback on the specified voice and flushes/resets the current position.
+ * @param voice Pointer to the audio voice to stop.
+ * @return true if playback was successfully stopped, false otherwise.
+ */
+bool nxAudioVoiceStop(nxAudioVoice *voice);
+
+/**
+ * @brief Pauses playback on the specified voice, retaining the current playback position.
+ * @param voice Pointer to the audio voice to pause.
+ * @return true if playback was successfully paused, false otherwise.
+ */
+bool nxAudioVoicePause(nxAudioVoice *voice);
+
+/**
+ * @brief Sets the output volume level for a specific voice.
+ * @param voice Pointer to the audio voice to adjust.
+ * @param volume Floating-point volume level clamped between 0.0f (muted) and 1.0f (maximum).
+ * @return true if the volume was successfully updated, false otherwise.
+ */
+bool nxAudioVoiceSetVolume(nxAudioVoice *voice, float volume);
 
 nxAudioResult nxAudioGetLastError (void);
 

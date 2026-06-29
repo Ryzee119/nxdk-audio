@@ -26,14 +26,14 @@ typedef struct mcpx_prd
 {
     uint32_t phys_addr;
     uint32_t length_and_format;
-} mcpx_sge_t, mcpx_ssl_t;
+} __attribute__((packed)) mcpx_sge_t, mcpx_ssl_t;
 static_assert(sizeof(struct mcpx_prd) == 8, "PRD segment entry must be exactly 8 bytes");
 
 typedef struct mcpx_notifier
 {
     uint8_t unk[15];
     uint8_t status;
-} mcpx_notifier_t;
+} __attribute__((packed)) mcpx_notifier_t;
 static_assert(sizeof(mcpx_notifier_t) == 16, "Notifier must be 16 bytes");
 
 // Each voice struct as accessed by the Voice processor is 128 bytes in size. This area is not written directly by the
@@ -64,7 +64,7 @@ typedef struct mcpx_hw_voice
     uint32_t tar_fca;
     uint32_t tar_fcb;
     uint32_t tar_pitch_link;
-} mcpx_voice_t;
+} __attribute__((packed)) mcpx_voice_t;
 static_assert(sizeof(mcpx_voice_t) == 128, "Voice structure must be exactly 128 bytes");
 
 // clang-format off

@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <xboxkrnl/xboxkrnl.h>
 
 #define AC97_MMIO_BASE      0xFEC00000
@@ -44,7 +45,7 @@
 #define APU_SHIFT(reg_mask)             (__builtin_ffs((int)(reg_mask)) - 1)
 #define APU_MAKE_VALUE(reg_mask, value) ((((uint32_t)(value)) << APU_SHIFT(reg_mask)) & (uint32_t)(reg_mask))
 
-static nxAudioResult lastError = 0;
+static nxAudioResult g_last_error = 0;
 static mcpx_voice_t *g_voice_array = NULL;
 static mcpx_ssl_t *g_ssl_array = NULL;
 static mcpx_notifier_t *g_notifier_array = NULL;
@@ -56,8 +57,8 @@ static nxAudioVoice *g_running_voices[MCPX_HW_MAX_VOICES] = {0};
 static uint32_t g_voice_allocation_mask[(MCPX_HW_MAX_VOICES + 31) / 32];
 static KINTERRUPT g_apu_interrupt;
 static KDPC g_apu_dpc;
-static ac97_descriptor_t pcmSpdifDescriptor[1];
-static ac97_descriptor_t pcmOutDescriptor[1];
+static ac97_descriptor_t spdif_output_descriptor[1];
+static ac97_descriptor_t pcm_output_descriptor[1];
 
 static const char passthrough_text[] = {
 #embed "passthrough.out"
@@ -78,9 +79,9 @@ static uint8_t voice_allocate (bool is_3d)
     // Voices 0-63 are reserved for 3D voices.
     for (int i = (is_3d ? 0 : 2); i < (MCPX_HW_MAX_VOICES + 31) / 32; i++) {
         if (g_voice_allocation_mask[i] != 0x00000000) {
-            const int bitIndex = __builtin_ctz(g_voice_allocation_mask[i]);
-            g_voice_allocation_mask[i] &= ~(1U << bitIndex); // Mark as allocated
-            return (uint8_t)((i * 32) + bitIndex);
+            const int bit = __builtin_ctz(g_voice_allocation_mask[i]);
+            g_voice_allocation_mask[i] &= ~(1U << bit); // Mark as allocated
+            return (uint8_t)((i * 32) + bit);
         }
     }
     return 0xFF;
@@ -95,7 +96,7 @@ static void voice_free (uint8_t voice_index)
 
 static void set_last_error (nxAudioResult result)
 {
-    lastError = result;
+    g_last_error = result;
 }
 
 static uint32_t get_voice_container_size (const nxAudioFormat *format)
@@ -218,8 +219,8 @@ static void NTAPI apu_dpc (PKDPC Dpc, PVOID DeferredContext, PVOID arg1, PVOID a
                     if (g_notifier_array[notifier_index + j].status == NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS) {
                         g_notifier_array[notifier_index + j].status = NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS;
                         if (voice->callback) {
-                            MmLockUnlockBufferPages(voice->currentBuffer[j]->pUserBuffer,
-                                                    voice->currentBuffer[j]->sizeBytes, TRUE);
+                            MmLockUnlockBufferPages(voice->currentBuffer[j]->buffer,
+                                                    voice->currentBuffer[j]->size_bytes, TRUE);
                             voice->callback(voice, voice->currentBuffer[j], voice->user_data);
                         }
                     }
@@ -231,7 +232,7 @@ static void NTAPI apu_dpc (PKDPC Dpc, PVOID DeferredContext, PVOID arg1, PVOID a
 
 nxAudioResult nxAudioGetLastError (void)
 {
-    return lastError;
+    return g_last_error;
 }
 
 static size_t parse_a56_output (const char *a56_text, uint32_t *output_buffer, size_t max_out)
@@ -441,45 +442,53 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
 
     // Initalise AC97 hardware and point them to our DMA descriptors.
     {
-        pcmOutDescriptor[0].bufferStartAddress = MmGetPhysicalAddress(g_ac97_buffer);
-        pcmOutDescriptor[0].bufferLengthInSamples = (AC97_BUFFER_SIZE / 2) - 1;
-        pcmOutDescriptor[0].bufferControl = 0x0000;
-        memcpy(pcmSpdifDescriptor, pcmOutDescriptor, sizeof(pcmOutDescriptor));
+        pcm_output_descriptor[0].bufferStartAddress = MmGetPhysicalAddress(g_ac97_buffer);
+        pcm_output_descriptor[0].bufferLengthInSamples = (AC97_BUFFER_SIZE / 2);
+        pcm_output_descriptor[0].bufferControl = 0x0000;
 
-        // Trigger Warm Reset and wait for the Codec to report Ready
-        bm->global_control |= AC97_GLOB_CNT_WARM_RESET;
-        while (!(bm->global_status & AC97_GLOB_STA_CODEC_READY))
+        spdif_output_descriptor[0].bufferStartAddress = MmGetPhysicalAddress(g_ac97_buffer);
+        spdif_output_descriptor[0].bufferLengthInSamples = (AC97_BUFFER_SIZE / 2);
+        spdif_output_descriptor[0].bufferControl = 0x0000;
+
+        // Trigger Reset and wait for the Codec to report Ready
+        bm->global_control |= AC97_GLOBAL_CR_RESET;
+        while (!(bm->global_status & AC97_GLOBAL_SR_CODEC_READY))
             ;
 
-        // Reset mixer powerdown and PCM/SPDIF controls
+        // Turn everything on - Reset mixer powerdown and PCM/SPDIF control
         mixer->powerdown_control = AC97_POWER_NORMAL;
         bm->pcm_out_control = AC97_BM_CR_RESET;
         bm->spdif_control = AC97_BM_CR_RESET;
 
         // Set volumes
-        mixer->master_volume = AC97_VOL_MAX;
-        mixer->pcm_out_volume = AC97_VOL_12DB_ATTEN;
+        mixer->master_volume = 0x0000;
+        mixer->pcm_out_volume = 0x0808; // -12dB on left and right channel
 
         // Reset PCM and SPDIF Out
         bm->pcm_out_control = AC97_BM_CR_RESET;
-        bm->spdif_control = AC97_BM_CR_RESET;
-        while (bm->pcm_out_control & AC97_BM_CR_RESET || bm->spdif_control & AC97_BM_CR_RESET)
+        while (bm->pcm_out_control & AC97_BM_CR_RESET)
             ;
 
-        bm->pcm_out_buffer_base = MmGetPhysicalAddress(pcmOutDescriptor);
-        bm->pcm_out_current_index = 0;
-        bm->pcm_out_last_valid_index = 0; // After 0 it loops back to zero! good for our ring buffer
+        bm->spdif_control = AC97_BM_CR_RESET;
+        while (bm->spdif_control & AC97_BM_CR_RESET)
+            ;
 
-        bm->spdif_buffer_base = MmGetPhysicalAddress(pcmSpdifDescriptor);
+        bm->pcm_out_buffer_base = MmGetPhysicalAddress(pcm_output_descriptor);
+        bm->pcm_out_current_index = 0;
+        bm->pcm_out_last_valid_index = 0;
+
+        bm->spdif_buffer_base = MmGetPhysicalAddress(spdif_output_descriptor);
         bm->spdif_current_index = 0;
         bm->spdif_last_valid_index = 0;
-        bm->spdif_dma_config = NFORCE_SPDIF_DMA_ENABLE;
+
+        // ?
+        bm->x7c_unk_control = AC97_7C_UNK;
     }
 
     // Set the GP FIFO size characteristics
     {
         apu_write_reg(NV_PAPU_GPFMAXSGE, (GP_FIFO_OUTPUT_SIZE / PAGE_SIZE) - 1); // How many pages
-        apu_write_reg(0x1148, (GP_FIFO_OUTPUT_SIZE / PAGE_SIZE) - 1);            // ? Always seem to be same as aabove
+        apu_write_reg(0x1148, (GP_FIFO_OUTPUT_SIZE / PAGE_SIZE) - 1);            // ? Always seem to be same as above
         apu_write_reg(NV_PAPU_GPOFBASE0, 0);
         apu_write_reg(NV_PAPU_GPOFEND0, GP_FIFO_OUTPUT_SIZE);
 
@@ -549,21 +558,28 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
     apu_write_reg(NV_PAPU_SECTL, 0x0000000F);
 
     // Start AC97
-    bm->spdif_control = AC97_BM_CR_RUN;
-    bm->pcm_out_control = AC97_BM_CR_RUN;
+    bm->spdif_control = AC97_BM_CR_START;
+    bm->pcm_out_control = AC97_BM_CR_START;
     return true;
 }
 
 void nxAudioShutdown (void)
 {
+    volatile ac97_busmaster_regs_t *bm = (ac97_busmaster_regs_t *)AC97_BUSMASTER_MMIO;
+    bm->spdif_control = AC97_BM_CR_RESET;
+    bm->pcm_out_control = AC97_BM_CR_RESET;
+
     apu_write_reg(NV_PAPU_IEN, 0x00000000);
-    apu_write_reg(NV_PAPU_SECTL, 0x00000000);
+
+    apu_write_reg(0x1510, 0x00000001);
+    apu_write_reg(NV_PAPU_FECTL, 0);
+    apu_write_reg(NV_PAPU_SECTL, 0);
 
     KeDisconnectInterrupt(&g_apu_interrupt);
     KeRemoveQueueDpc(&g_apu_dpc);
 
-    apu_write_reg(NV_PAPU_VPVADDR, 0x00000000);
-    apu_write_reg(NV_PAPU_VPSSLADDR, 0x00000000);
+    apu_write_reg(APU_GP_OFFSET + NV_PAPU_GPRST, 0x00000000);
+    apu_write_reg(APU_EP_OFFSET + NV_PAPU_GPRST, 0x00000000);
 
     if (g_ac97_buffer) {
         MmFreeContiguousMemory(g_ac97_buffer);
@@ -601,15 +617,15 @@ void nxAudioShutdown (void)
     }
 }
 
-bool nxAudioBufferInitialise (nxAudioBuffer *outBuffer, void *pUserBuffer, uint32_t sizeBytes)
+bool nxAudioBufferInitialise (nxAudioBuffer *buffer, void *user_buffer, uint32_t size_bytes)
 {
-    if (!outBuffer || !pUserBuffer || sizeBytes == 0) {
+    if (!buffer || !user_buffer || size_bytes == 0) {
         set_last_error(NX_AUDIO_ERR_INVALID_PARAM);
         return false;
     }
 
-    outBuffer->pUserBuffer = pUserBuffer;
-    outBuffer->sizeBytes = sizeBytes;
+    buffer->buffer = user_buffer;
+    buffer->size_bytes = size_bytes;
     return true;
 }
 
@@ -711,7 +727,7 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
 
     // Now push it all to hardware.
     wait_for_pio_available(18);
-    KIRQL oldIrql = KeRaiseIrqlToDpcLevel(); // Avoid context switches after NV1BA0_PIO_SET_CURRENT_VOICE
+    KIRQL irql = KeRaiseIrqlToDpcLevel(); // Avoid context switches after NV1BA0_PIO_SET_CURRENT_VOICE
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_FMT, hw_voice.cfg_fmt);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_MISC, hw_voice.cfg_misc);
@@ -730,7 +746,7 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_VOLC, hw_voice.tar_volc);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_PITCH, hw_voice.tar_pitch_link);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_HRTF, hw_voice.hrtf_target);
-    KfLowerIrql(oldIrql);
+    KfLowerIrql(irql);
 
     return true;
 }
@@ -745,48 +761,48 @@ void nxAudioVoiceDestroy (nxAudioVoice *voice)
     voice_free(voice->voice_index);
 }
 
-static void get_memory_properties (void *virtual_pointer, uint32_t max_length, uint32_t *out_phys_addr,
-                                   uint32_t *out_contig_length)
+static void get_memory_properties (void *virtual_pointer, uint32_t max_length, uint32_t *out_physical_address,
+                                   uint32_t *out_contiguous_length)
 {
     uint8_t *virtual_address = (uint8_t *)virtual_pointer;
-    uint32_t physAddr = (uint32_t)MmGetPhysicalAddress(virtual_address);
-    uint32_t contiguousBytes;
+    uint32_t physical_address = (uint32_t)MmGetPhysicalAddress(virtual_address);
+    uint32_t contiguous_bytes;
 
     // --- XBOX KSEG0 FAST-PATH ---
     // If the pointer is in the direct-mapped KSEG0 region, it is guaranteed
     // to be physically contiguous. Skip the page table walking entirely!
     if ((uintptr_t)virtual_address >= 0x80000000 && (uintptr_t)virtual_address < 0x90000000) {
-        contiguousBytes = max_length;
+        contiguous_bytes = max_length;
     } else {
         // Standard Page-Table Probing (For paged memory like malloc)
-        contiguousBytes = PAGE_SIZE - (physAddr & (PAGE_SIZE - 1));
-        if (contiguousBytes > max_length) {
-            contiguousBytes = max_length;
+        contiguous_bytes = PAGE_SIZE - (physical_address & (PAGE_SIZE - 1));
+        if (contiguous_bytes > max_length) {
+            contiguous_bytes = max_length;
         }
 
-        uint8_t *probePtr = virtual_address + contiguousBytes;
-        uint32_t probeLeft = max_length - contiguousBytes;
-        uint32_t currentPhys = physAddr + contiguousBytes;
+        uint8_t *cursor = virtual_address + contiguous_bytes;
+        uint32_t remaining = max_length - contiguous_bytes;
+        uint32_t current_address = physical_address + contiguous_bytes;
 
-        while (probeLeft > 0) {
-            uint32_t nextPhys = (uint32_t)MmGetPhysicalAddress(probePtr);
-            if (nextPhys != currentPhys) {
+        while (remaining > 0) {
+            uint32_t next_address = (uint32_t)MmGetPhysicalAddress(cursor);
+            if (next_address != current_address) {
                 break;
             }
 
-            uint32_t nextContig = PAGE_SIZE - (nextPhys & (PAGE_SIZE - 1));
-            if (nextContig > probeLeft) {
-                nextContig = probeLeft;
+            uint32_t next_contiguous = PAGE_SIZE - (next_address & (PAGE_SIZE - 1));
+            if (next_contiguous > remaining) {
+                next_contiguous = remaining;
             }
 
-            contiguousBytes += nextContig;
-            probePtr += nextContig;
-            probeLeft -= nextContig;
-            currentPhys += nextContig;
+            contiguous_bytes += next_contiguous;
+            cursor += next_contiguous;
+            remaining -= next_contiguous;
+            current_address += next_contiguous;
         }
     }
-    *out_phys_addr = physAddr;
-    *out_contig_length = contiguousBytes;
+    *out_physical_address = physical_address;
+    *out_contiguous_length = contiguous_bytes;
 }
 
 bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
@@ -814,10 +830,10 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
         max_bytes_per_ssl = 65535 * bytes_per_block;
     }
 
-    MmLockUnlockBufferPages(buffer->pUserBuffer, buffer->sizeBytes, FALSE);
+    MmLockUnlockBufferPages(buffer->buffer, buffer->size_bytes, FALSE);
 
-    uint8_t *virtual_address = (uint8_t *)buffer->pUserBuffer;
-    uint32_t bytes_left = buffer->sizeBytes;
+    uint8_t *virtual_address = (uint8_t *)buffer->buffer;
+    uint32_t bytes_left = buffer->size_bytes;
     uint32_t index = 0;
 
     while (bytes_left > 0) {
@@ -833,7 +849,7 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
         uint32_t contiguous_bytes;
         get_memory_properties(virtual_address, bytes_left, &physical_address, &contiguous_bytes);
 
-        // Clamp it to max
+        // Clamp it to allowable size for a SSL entry
         if (contiguous_bytes > max_bytes_per_ssl) {
             contiguous_bytes = max_bytes_per_ssl;
         }
@@ -854,8 +870,8 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
 
         hw_ssl.phys_addr = physical_address;
         hw_ssl.length_and_format = 0;
-        hw_ssl.length_and_format |= (block_samples & 0xFFFF);         // Sample count for this block
-        hw_ssl.length_and_format |= ((container_index & 0x3) << 16U); // Container size
+        hw_ssl.length_and_format |= (block_samples & 0xFFFF);
+        hw_ssl.length_and_format |= (container_index << 16U);
         hw_ssl.length_and_format |= ((uint32_t)(voice->format.channels - 1) << 18);
         hw_ssl.length_and_format |= ((voice->format.channels > 1 ? 1U : 0U) << 23);
 
@@ -880,7 +896,7 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
     }
 
     wait_for_pio_available(2);
-    KIRQL oldIrql = KeRaiseIrqlToDpcLevel();
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
 
     const int notifier_idx =
         MCPX_HW_NOTIFIER_BASE_OFFSET + (voice->voice_index * MCPX_HW_NOTIFIER_COUNT) + voice->currentBufferIndex;
@@ -899,7 +915,7 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
     voice->currentBuffer[voice->currentBufferIndex] = buffer;
     voice->currentBufferIndex = (voice->currentBufferIndex + 1) % 2;
 
-    KfLowerIrql(oldIrql);
+    KfLowerIrql(irql);
 
     return true;
 }
@@ -924,7 +940,7 @@ bool nxAudioVoiceStart (nxAudioVoice *voice)
     }
 
     wait_for_pio_available(6);
-    KIRQL oldIrql = KeRaiseIrqlToDpcLevel();
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
 
     g_running_voices[voice->voice_index] = voice;
 
@@ -943,7 +959,7 @@ bool nxAudioVoiceStart (nxAudioVoice *voice)
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_PAUSE, voice->voice_index);
 
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
-    KfLowerIrql(oldIrql);
+    KfLowerIrql(irql);
 
     while (apu_read_reg(APU_VP_OFFSET + NV1BA0_PIO_FREE) < 64)
         ;
@@ -959,7 +975,7 @@ bool nxAudioVoiceStop (nxAudioVoice *voice)
 
     const uint16_t voice_index = voice->voice_index;
 
-    KIRQL oldIrql = KeRaiseIrqlToDpcLevel();
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
 
     g_running_voices[voice_index] = NULL;
 
@@ -967,10 +983,12 @@ bool nxAudioVoiceStop (nxAudioVoice *voice)
     g_notifier_array[notifier_index + 0].status = NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS;
     g_notifier_array[notifier_index + 1].status = NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS;
 
-    KfLowerIrql(oldIrql);
+    KfLowerIrql(irql);
 
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_OFF, voice_index);
 
+    MmLockUnlockBufferPages(voice->currentBuffer[0]->buffer, voice->currentBuffer[0]->size_bytes, TRUE);
+    MmLockUnlockBufferPages(voice->currentBuffer[1]->buffer, voice->currentBuffer[1]->size_bytes, TRUE);
     voice->currentBuffer[0] = NULL;
     voice->currentBuffer[1] = NULL;
     voice->currentBufferIndex = 0;
@@ -1009,11 +1027,9 @@ bool nxAudioVoiceSetVolume (nxAudioVoice *voice, float volume)
     uint32_t attenuation_hw;
     if (volume <= 0.0f) {
         attenuation_hw = 0xFFF; // mute
-    }
-    else if (volume > 1.0f) {
+    } else if (volume > 1.0f) {
         attenuation_hw = 0x000; // 0 dB, no attenuation
-    }
-    else {
+    } else {
         const float attenuation = -20.0f * log10f(volume);
         attenuation_hw = (uint32_t)roundf(attenuation * 64.0f);
         if (attenuation_hw > 0xFFF) {
@@ -1028,13 +1044,13 @@ bool nxAudioVoiceSetVolume (nxAudioVoice *voice, float volume)
                               APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_VOLA_VOLUME7_B3_0, 0xF);
 
     wait_for_pio_available(4);
-    KIRQL oldIrql = KeRaiseIrqlToDpcLevel();
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_VOLA, tar_vola);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
     voice->volume = volume;
-    KfLowerIrql(oldIrql);
+    KfLowerIrql(irql);
 
     return true;
 }

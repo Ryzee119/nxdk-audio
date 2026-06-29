@@ -45,6 +45,7 @@ _start
     ; and we set up where to read the audio data from and where to output it.
     ; Our setup will read data from MIXBIN 0 and MIXBIN 1 (Front left and front right)
     ; and output it to GP OUT FIFO 0 (Set up in nxdk audio driver) for consumption by AC97.
+    ; Ref https://xboxdevwiki.net/DSP#Command_blocks
     
     ; word0 = next block linkage
     ; We link back to itself, but also set the end of list bit ($4000)
@@ -56,9 +57,9 @@ _start
     ; and output a 16-bit stereo interleaved PCM stream for AC97.
     ;   Bits 14-27 : 32  (How many samples the DMA increments per read)
     ;   Bit  13    : 0   (?) r
-    ;   Bits 10-12 : 1   (0 = 8-bit, 1 = 16-bit, 2 = 24-bit)
+    ;   Bits 10-12 : 1   (0 = 8-bit, 1 = 16-bit, 2 = 24-bit (padded to 4 bytes), 3 = 32-bit)
     ;   Bit  9     : 0   (?)
-    ;   Bits 5-8   : 0   (Buffer ID = 0, meaning GP Output FIFO 0)
+    ;   Bits 5-8   : 0   (Buffer ID = 0, meaning FIFO 0)
     ;   Bit  4     : 0   (Enable Scratch offset writeback (To word 4))
     ;   Bits 2-3   : 0   (?)
     ;   Bit  1     : 1   (Direction. 1 = Write to RAM, 0 = Read from RAM)

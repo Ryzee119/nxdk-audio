@@ -28,13 +28,13 @@ void GenerateMultiFormatSine (StreamContext *ctx, nxAudioBuffer *buffer)
 {
     // FIX 1: If 24-bit (3 bytes), force the physical memory stride to 4 bytes for the math
     uint32_t containerBytes = (ctx->format.bytesPerSample == 3) ? 4 : ctx->format.bytesPerSample;
-    uint32_t numFrames = buffer->sizeBytes / (containerBytes * ctx->format.channels);
+    uint32_t numFrames = buffer->size_bytes / (containerBytes * ctx->format.channels);
 
     float phaseStep = (2.0f * PI * ctx->frequency) / (float)ctx->format.sampleRate;
 
-    uint8_t *dst8 = (uint8_t *)buffer->pUserBuffer;
-    int16_t *dst16 = (int16_t *)buffer->pUserBuffer;
-    int32_t *dst32 = (int32_t *)buffer->pUserBuffer;
+    uint8_t *dst8 = (uint8_t *)buffer->buffer;
+    int16_t *dst16 = (int16_t *)buffer->buffer;
+    int32_t *dst32 = (int32_t *)buffer->buffer;
 
     for (uint32_t i = 0; i < numFrames; i++) {
         // Generate the raw wave and scale volume to 25%
@@ -154,6 +154,27 @@ void TestStreamingAudio (void)
     while (buffersProcessed < 2000) // Run longer since polling happens much faster
     {
         Sleep(1000);
+        debugPrint("Changing volume of voice 0 to 50%%\n");
+        nxAudioVoiceSetVolume(&streams[0].voice, 0.51f);
+
+        Sleep(1000);
+        debugPrint("Pausing voice 0\n");
+        nxAudioVoicePause(&streams[0].voice); 
+
+        Sleep(1000);
+        debugPrint("Unpausing voice 0\n");
+        nxAudioVoiceStart(&streams[0].voice);
+
+        //Sleep(1000);
+        //debugPrint("Shutting down voice 0\n");
+        //nxAudioVoiceStop(&streams[0].voice);
+
+        Sleep(1000);
+        debugPrint("Shutting down audio system\n");
+        nxAudioShutdown();
+        while(1) {
+            Sleep(1000);
+        }
     }
     debugPrint("Test complete. Shutting down...\n");
 
