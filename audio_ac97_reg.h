@@ -67,12 +67,14 @@ typedef struct
     volatile uint32_t global_status;  // 0x30
     uint8_t _pad3[0x3C];              // 0x34 - 0x6F
 
-    // SPDIF Out (Offset 0x70) - MCPX specific?
+    // SPDIF Out (Offset 0x70)
     volatile uint32_t spdif_buffer_base;     // 0x70
     volatile uint8_t spdif_current_index;    // 0x74
     volatile uint8_t spdif_last_valid_index; // 0x75
     uint8_t _pad4[0x05];                     // 0x76 - 0x7A
     volatile uint8_t spdif_control;          // 0x7B
+
+    // MCPX specific?
     volatile uint32_t x7c_unk_control;       // 0x7C
 } __attribute__((packed)) ac97_busmaster_regs_t;
 static_assert(sizeof(ac97_busmaster_regs_t) == 0x80, "Busmaster Registers must be exactly 0x80 bytes");
