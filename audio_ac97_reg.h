@@ -9,9 +9,9 @@
 // buffer descriptor from AC97 specification
 typedef struct
 {
-    unsigned int bufferStartAddress;
-    unsigned short bufferLengthInSamples; // 0=no smaples
-    unsigned short bufferControl;         // b15=1=issue IRQ on completion, b14=1=last in stream
+    unsigned int buffer_start_address;
+    unsigned short buffer_sample_count; // 0=no smaples
+    unsigned short buffer_control;      // b15=1=issue IRQ on completion, b14=1=last in stream
 } ac97_descriptor_t __attribute__((aligned(8)));
 
 // Global Control
@@ -65,7 +65,7 @@ typedef struct
     uint8_t _pad2[0x10];              // 0x1C - 0x2B
     volatile uint32_t global_control; // 0x2C
     volatile uint32_t global_status;  // 0x30
-    uint8_t _pad3[0x3C]; // 0x34 - 0x6F
+    uint8_t _pad3[0x3C];              // 0x34 - 0x6F
 
     // SPDIF Out (Offset 0x70) - MCPX specific?
     volatile uint32_t spdif_buffer_base;     // 0x70

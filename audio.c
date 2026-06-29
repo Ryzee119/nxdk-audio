@@ -442,13 +442,13 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
 
     // Initalise AC97 hardware and point them to our DMA descriptors.
     {
-        pcm_output_descriptor[0].bufferStartAddress = MmGetPhysicalAddress(g_ac97_buffer);
-        pcm_output_descriptor[0].bufferLengthInSamples = (AC97_BUFFER_SIZE / 2);
-        pcm_output_descriptor[0].bufferControl = 0x0000;
+        pcm_output_descriptor[0].buffer_start_address = MmGetPhysicalAddress(g_ac97_buffer);
+        pcm_output_descriptor[0].buffer_sample_count = (AC97_BUFFER_SIZE / 2);
+        pcm_output_descriptor[0].buffer_control = 0x0000;
 
-        spdif_output_descriptor[0].bufferStartAddress = MmGetPhysicalAddress(g_ac97_buffer);
-        spdif_output_descriptor[0].bufferLengthInSamples = (AC97_BUFFER_SIZE / 2);
-        spdif_output_descriptor[0].bufferControl = 0x0000;
+        spdif_output_descriptor[0].buffer_start_address = MmGetPhysicalAddress(g_ac97_buffer);
+        spdif_output_descriptor[0].buffer_sample_count = (AC97_BUFFER_SIZE / 2);
+        spdif_output_descriptor[0].buffer_control = 0x0000;
 
         // Trigger Reset and wait for the Codec to report Ready
         bm->global_control |= AC97_GLOBAL_CR_RESET;
