@@ -206,12 +206,18 @@ static BOOLEAN NTAPI apu_isr (PKINTERRUPT Interrupt, PVOID ServiceContext)
         } else if ((fectl & NV_PAPU_FECTL_FETRAPREASON_REQUESTED) && meth == SE2FE_IDLE_VOICE) {
             // I was getting crashes on xemu, but not on hardware.
             // Looks like retail manually removes voices from hardware list on idle.
-            // These needs to be in ISR while VP is trapped to prevent race conditions.
+            // These needs to be in ISR while VP is trapped to prevent race conditions. (FIXME - can it be DPC if i dont
+            // clear trap?) The VP maintains a voice list, tvl = top, cvl = current, nvl = next. Each voice is a single
+            // linked list that maintains a pointer to the next voice if its on the processing list. To remove the idle
+            // voice we have to find it on the hardware processing list, find its predecessor and remove it from the
+            // single linked list. We also need to update the hardware pointers to ensure they dont refer to our
+            // removed voice
             const uint32_t idle_voice = param;
             const uint32_t cfg_fmt = apu_read_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_FMT);
 
             if (idle_voice < 256 && !(cfg_fmt & NV_PAVS_VOICE_CFG_FMT_PERSIST)) {
 #if (1)
+                // FIXME - These should use xVL3D for 3d voices
                 uint32_t tvl_2d = apu_read_reg(NV_PAPU_TVL2D);
                 uint32_t cvl_2d = apu_read_reg(NV_PAPU_CVL2D);
                 uint32_t nvl_2d = apu_read_reg(NV_PAPU_NVL2D);
@@ -234,24 +240,27 @@ static BOOLEAN NTAPI apu_isr (PKINTERRUPT Interrupt, PVOID ServiceContext)
                     current_voice =
                         g_voice_array[current_voice].tar_pitch_link & NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
                 }
-                assert(current_voice != 0xFFFF);
 
                 // If our voice was still in the list, link the previous voice over it
-                if (voice_prev != 0xFFFF) {
-                    temp = g_voice_array[voice_prev].tar_pitch_link & ~NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
-                    temp |= voice_next;
-                    g_voice_array[voice_prev].tar_pitch_link = temp;
-                } else if (tvl_2d == idle_voice) {
-                    tvl_2d = voice_next;
-                    apu_write_reg(NV_PAPU_TVL2D, tvl_2d);
+                // If it didnt have a previous voice, it must be the heads so fix tvl.
+                if (current_voice != 0xFFFF) {
+                    if (voice_prev != 0xFFFF) {
+                        temp =
+                            g_voice_array[voice_prev].tar_pitch_link & ~NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+                        temp |= voice_next;
+                        g_voice_array[voice_prev].tar_pitch_link = temp;
+                    } else if (tvl_2d == idle_voice) {
+                        tvl_2d = voice_next;
+                        apu_write_reg(NV_PAPU_TVL2D, tvl_2d);
+                    }
                 }
 
-                // When a voice isn't in the processing list it should be linked to itself.
+                // When a voice isn't in the processing list it should be linked to itself. Just what hardware expects
                 temp = g_voice_array[idle_voice].tar_pitch_link & ~NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
                 temp |= idle_voice;
                 g_voice_array[idle_voice].tar_pitch_link = temp;
 
-                // Fix up hardware pointers
+                // Fix up remaining hardware pointers (CVL and NVL)
                 if (cvl_2d == idle_voice) {
                     if (voice_next != 0xFFFF) {
                         apu_write_reg(NV_PAPU_CVL2D, voice_next);
@@ -306,8 +315,8 @@ static void NTAPI apu_dpc (PKDPC Dpc, PVOID DeferredContext, PVOID arg1, PVOID a
 
             const uint32_t notifier_index = MCPX_HW_NOTIFIER_BASE_OFFSET + (voice_index * MCPX_HW_NOTIFIER_COUNT);
 
-            // Check SSLA and SSLB notifiers for this voice. If either is done, call the callback and remark the
-            // notifier as in progress.
+            // Check SSLA and SSLB notifiers for this voice. If either is done, run user callback and reset notifier
+            // status
             for (uint32_t j = 0; j < 2; j++) {
                 if (voice->currentBuffer[j]) {
                     if (g_notifier_array[notifier_index + j].status == NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS) {
