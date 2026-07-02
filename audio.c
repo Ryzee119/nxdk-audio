@@ -45,6 +45,12 @@
 #define APU_SHIFT(reg_mask)             (__builtin_ffs((int)(reg_mask)) - 1)
 #define APU_MAKE_VALUE(reg_mask, value) ((((uint32_t)(value)) << APU_SHIFT(reg_mask)) & (uint32_t)(reg_mask))
 
+#define NV_PAVS_VOICE_CFG_ENV1_EF_ATTACKRATE   NV_PAVS_VOICE_CFG_ENV0_EA_ATTACKRATE
+#define NV_PAVS_VOICE_CFG_ENVF_EF_DECAYRATE    NV_PAVS_VOICE_CFG_ENVA_EA_DECAYRATE
+#define NV_PAVS_VOICE_CFG_ENVF_EF_HOLDTIME     NV_PAVS_VOICE_CFG_ENVA_EA_HOLDTIME
+#define NV_PAVS_VOICE_CFG_ENVF_EF_SUSTAINLEVEL NV_PAVS_VOICE_CFG_ENVA_EA_SUSTAINLEVEL
+#define NV_PAVS_VOICE_CFG_ENV1_EF_DELAYTIME    NV_PAVS_VOICE_CFG_ENV0_EA_DELAYTIME
+
 static nxAudioResult g_last_error = 0;
 static mcpx_voice_t *g_voice_array = NULL;
 static mcpx_ssl_t *g_ssl_array = NULL;
@@ -174,15 +180,95 @@ static BOOLEAN NTAPI apu_isr (PKINTERRUPT Interrupt, PVOID ServiceContext)
         const uint32_t param = apu_read_reg(NV_PAPU_FEDECPARAM);
         const uint32_t reason = (fectl >> 8) & 0xF;
 
-        debugPrint("\n=== APU FRONT-END TRAP ===\n");
-        debugPrint("Reason Code : 0x%X\n", reason);
-        debugPrint("FECTL       : 0x%08X\n", fectl);
-        debugPrint("FECV        : 0x%08X\n", fecv);
-        debugPrint("Failed METH : 0x%08X\n", meth);
-        debugPrint("Failed PARAM: 0x%08X\n", param);
-        debugPrint("==========================\n");
-        while (1)
-            ; // Halt on trap for debugging
+        if (!(fectl & NV_PAPU_FECTL_FETRAPREASON_REQUESTED) && reason != 0) {
+            debugPrint("\n=== APU FRONT-END TRAP ===\n");
+            debugPrint("Reason Code : 0x%X\n", reason);
+            debugPrint("FECTL       : 0x%08X\n", fectl);
+            debugPrint("FECV        : 0x%08X\n", fecv);
+            debugPrint("Failed METH : 0x%08X\n", meth);
+            debugPrint("Failed PARAM: 0x%08X\n", param);
+            debugPrint("==========================\n");
+
+            uint32_t tvl_2d = apu_read_reg(NV_PAPU_TVL2D);
+            uint32_t cvl_2d = apu_read_reg(NV_PAPU_CVL2D);
+            uint32_t nvl_2d = apu_read_reg(NV_PAPU_NVL3D);
+            debugPrint("TVL2D: %08x, CVL2D: %08x, NVL2D: %08x\n", tvl_2d, cvl_2d, nvl_2d);
+            // Print linked list from CVL2D:
+            uint32_t list_head = cvl_2d;
+            while (list_head != 0xFFFF) {
+                debugPrint("%04x->", list_head);
+                list_head = g_voice_array[list_head].tar_pitch_link & 0xFFFF;
+            }
+            debugPrint("\n");
+            while (1)
+                ; // Halt on trap for debugging
+
+        } else if ((fectl & NV_PAPU_FECTL_FETRAPREASON_REQUESTED) && meth == SE2FE_IDLE_VOICE) {
+            // I was getting crashes on xemu, but not on hardware.
+            // Looks like retail manually removes voices from hardware list on idle.
+            // These needs to be in ISR while VP is trapped to prevent race conditions.
+            const uint32_t idle_voice = param;
+            const uint32_t cfg_fmt = apu_read_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_FMT);
+
+            if (idle_voice < 256 && !(cfg_fmt & NV_PAVS_VOICE_CFG_FMT_PERSIST)) {
+#if (1)
+                uint32_t tvl_2d = apu_read_reg(NV_PAPU_TVL2D);
+                uint32_t cvl_2d = apu_read_reg(NV_PAPU_CVL2D);
+                uint32_t nvl_2d = apu_read_reg(NV_PAPU_NVL2D);
+                uint32_t voice_next = 0xFFFF;
+                uint32_t voice_prev = 0xFFFF;
+                uint32_t temp;
+
+                voice_next = g_voice_array[idle_voice].tar_pitch_link & NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+                if (voice_next == idle_voice) {
+                    voice_next = 0xFFFF;
+                }
+
+                // Walk the hardware list to find our predecessor
+                uint32_t current_voice = tvl_2d;
+                while (current_voice != 0xFFFF) {
+                    if (current_voice == idle_voice) {
+                        break;
+                    }
+                    voice_prev = current_voice;
+                    current_voice =
+                        g_voice_array[current_voice].tar_pitch_link & NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+                }
+                assert(current_voice != 0xFFFF);
+
+                // If our voice was still in the list, link the previous voice over it
+                if (voice_prev != 0xFFFF) {
+                    temp = g_voice_array[voice_prev].tar_pitch_link & ~NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+                    temp |= voice_next;
+                    g_voice_array[voice_prev].tar_pitch_link = temp;
+                } else if (tvl_2d == idle_voice) {
+                    tvl_2d = voice_next;
+                    apu_write_reg(NV_PAPU_TVL2D, tvl_2d);
+                }
+
+                // When a voice isn't in the processing list it should be linked to itself.
+                temp = g_voice_array[idle_voice].tar_pitch_link & ~NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+                temp |= idle_voice;
+                g_voice_array[idle_voice].tar_pitch_link = temp;
+
+                // Fix up hardware pointers
+                if (cvl_2d == idle_voice) {
+                    if (voice_next != 0xFFFF) {
+                        apu_write_reg(NV_PAPU_CVL2D, voice_next);
+                        uint32_t voice_next_next =
+                            g_voice_array[voice_next].tar_pitch_link & NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+                        apu_write_reg(NV_PAPU_NVL2D, (voice_next_next == 0xFFFF) ? tvl_2d : voice_next_next);
+                    } else {
+                        apu_write_reg(NV_PAPU_CVL2D, 0xFFFF);
+                        apu_write_reg(NV_PAPU_NVL2D, tvl_2d);
+                    }
+                }
+                if (nvl_2d == idle_voice) {
+                    apu_write_reg(NV_PAPU_NVL2D, (voice_next != 0xFFFF) ? voice_next : tvl_2d);
+                }
+#endif
+            }
+        }
 
         // Restore FECTL to recover the engine
         apu_write_reg(NV_PAPU_FECTL, 0x0000100F);
@@ -291,8 +377,8 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
     volatile ac97_mixer_regs_t *mixer = (ac97_mixer_regs_t *)AC97_MIXER_MMIO;
     volatile ac97_busmaster_regs_t *bm = (ac97_busmaster_regs_t *)AC97_BUSMASTER_MMIO;
 
-    g_voice_array =
-        MmAllocateContiguousMemoryEx(MCPX_HW_MAX_VOICES * sizeof(mcpx_voice_t), 0, 0xFFFFFFFF, 0x8000, PAGE_READWRITE);
+    g_voice_array = MmAllocateContiguousMemoryEx(MCPX_HW_MAX_VOICES * sizeof(mcpx_voice_t), 0, 0xFFFFFFFF, 0x8000,
+                                                 PAGE_READWRITE | PAGE_NOCACHE);
 
     g_ssl_array =
         MmAllocateContiguousMemoryEx(MCPX_HW_MAX_SSL_PRDS * sizeof(mcpx_ssl_t), 0, 0xFFFFFFFF, 0x4000, PAGE_READWRITE);
@@ -391,7 +477,7 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
 
     // Set up something for the front end traps
     apu_write_reg(NV_PAPU_FETFORCE0, 0x00000000);
-    apu_write_reg(NV_PAPU_FETFORCE1, 0x00008000);
+    apu_write_reg(NV_PAPU_FETFORCE1, NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE);
     apu_write_reg(0x1508, 0x00800040);
     apu_write_reg(0x150c, 0x00000000);
 
@@ -437,8 +523,8 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
     // GP FIFO Scatter-Gather Element Address
     apu_write_reg(NV_PAPU_GPFADDR, (uint32_t)MmGetPhysicalAddress(g_gp_fifo_array));
 
-    // GP Scatter-Gather Element Address - In this driver its only purpose is to load in DSP assembler code into the GP
-    // memory space.
+    // GP Scatter-Gather Element Address - In this driver its only purpose is to load in DSP assembler code into the
+    // GP memory space.
     apu_write_reg(NV_PAPU_GPSADDR, (uint32_t)MmGetPhysicalAddress(g_gp_sge_array));
 
     // FIXME - What are these
@@ -517,10 +603,11 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
         apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_OUTBUF_LEN + gp_fifo_index * 8, AC97_BUFFER_SIZE);
 
         // Reset GP FIFO0 positions
-        apu_write_reg(0x2000 + gp_fifo_index * 0x10, apu_read_reg(0x2000));
-        apu_write_reg(0x2004 + gp_fifo_index * 0x10, apu_read_reg(0x2004));
-        apu_write_reg(0x2008 + gp_fifo_index * 0x10, apu_read_reg(0x2008));
-        apu_write_reg(0x200C + gp_fifo_index * 0x10, apu_read_reg(0x200C));
+        const uint32_t fifo_index_pos = gp_fifo_index * 0x10;
+        apu_write_reg(0x2000 + fifo_index_pos, apu_read_reg(0x2000 + fifo_index_pos));
+        apu_write_reg(0x2004 + fifo_index_pos, apu_read_reg(0x2004 + fifo_index_pos));
+        apu_write_reg(0x2008 + fifo_index_pos, apu_read_reg(0x2008 + fifo_index_pos));
+        apu_write_reg(0x200C + fifo_index_pos, apu_read_reg(0x200C + fifo_index_pos));
     }
 
     // ? Probably 3D Only
@@ -718,7 +805,7 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
     // Set pitch interpolation based on sample rate
     const int32_t pitch_val = convert_sample_rate_to_pitch_value((float)audio_format->sampleRate);
     hw_voice.tar_pitch_link = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH, (uint32_t)(int16_t)pitch_val) |
-                              APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE, 0x0000);
+                              APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE, voice_index);
     hw_voice.cfg_env0 = APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENV0_EA_ATTACKRATE, 0);
     hw_voice.cfg_enva = APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_SUSTAINLEVEL, 0);
 
@@ -731,6 +818,11 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
     voice->volume = 1.0f;
     voice->pitch_multiplier = 1.0f;
     voice->hw_cfg_fmt = hw_voice.cfg_fmt;
+    voice->hw_cfg_misc = hw_voice.cfg_misc;
+    voice->hw_cfg_env0 = hw_voice.cfg_env0;
+    voice->hw_cfg_enva = hw_voice.cfg_enva;
+    voice->hw_tar_lfo_env = hw_voice.tar_lfo_env;
+    voice->hw_voice_on_flags = 0;
     memset(&voice->adsr, 0, sizeof(nxAudioAdsr));
     memcpy(&voice->format, audio_format, sizeof(nxAudioFormat));
 
@@ -756,7 +848,6 @@ bool nxAudioVoiceCreate (nxAudioVoice *voice, const nxAudioFormat *audio_format,
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_PITCH, hw_voice.tar_pitch_link);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_HRTF, hw_voice.hrtf_target);
     KfLowerIrql(irql);
-
     return true;
 }
 
@@ -812,12 +903,11 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
         return false;
     }
 
-    const uint32_t ssl_base_index = (voice->voice_index * MCPX_HW_MAX_PRD_ENTRIES_PER_VOICE) +
-                                    (voice->currentBufferIndex * MCPX_HW_MAX_PRD_ENTRIES_PER_SSL);
-
     const uint8_t container_bytes_lookup[4] = {1, 2, 4, 4};
     const uint32_t container_index = get_voice_container_size(&voice->format);
     const uint32_t container_bytes = container_bytes_lookup[container_index & 3];
+    const uint32_t ssl_base_index = (voice->voice_index * MCPX_HW_MAX_PRD_ENTRIES_PER_VOICE) +
+                                    (voice->currentBufferIndex * MCPX_HW_MAX_PRD_ENTRIES_PER_SSL);
 
     uint32_t bytes_per_block;
     uint32_t max_bytes_per_ssl;
@@ -841,8 +931,8 @@ bool nxAudioVoiceSubmitBuffer (nxAudioVoice *voice, nxAudioBuffer *buffer)
             break;
         }
 
-        // Each SSL entry can be up to 65535 samples and it must be divided into block of contigous memory (if the user
-        // did not provide a contiguous buffer). We can have 16 SSL entries in the SSL list. If your memory is
+        // Each SSL entry can be up to 65535 samples and it must be divided into block of contigous memory (if the
+        // user did not provide a contiguous buffer). We can have 16 SSL entries in the SSL list. If your memory is
         // contiguous this is 16*65535 samples. If your memory is fragmented, it will be less than that.
         uint32_t physical_address;
         uint32_t contiguous_bytes;
@@ -948,18 +1038,37 @@ bool nxAudioVoiceStart (nxAudioVoice *voice)
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_FMT, voice->hw_cfg_fmt);
 
-    // Insert the voice into the voice list.
     const uint32_t antecedent_cmd =
         APU_MAKE_VALUE(NV1BA0_PIO_SET_ANTECEDENT_VOICE_HANDLE, 0xFFFF) |
         APU_MAKE_VALUE(NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST, (voice->format.type == NX_VOICE_TYPE_2D_STREAM)
                                                                  ? NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_2D_TOP
                                                                  : NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_ANTECEDENT_VOICE, antecedent_cmd);
-
-    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_ON, voice->voice_index);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_ON, voice->voice_index | voice->hw_voice_on_flags);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_PAUSE, voice->voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
     KfLowerIrql(irql);
+    return true;
+}
+
+bool nxAudioVoiceRelease (nxAudioVoice *voice)
+{
+    if (!voice) {
+        return false;
+    }
+
+    // Clear persist flag so after release phase the voice will be removed from the voice list.
+    voice->hw_cfg_fmt &= ~((uint32_t)NV_PAVS_VOICE_CFG_FMT_PERSIST);
+
+    wait_for_pio_available(5);
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice->voice_index);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_FMT, voice->hw_cfg_fmt);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_RELEASE, voice->voice_index);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
+    KfLowerIrql(irql);
+
     return true;
 }
 
@@ -969,38 +1078,19 @@ bool nxAudioVoiceStop (nxAudioVoice *voice)
         return false;
     }
 
-    // Clearing the persist bit will immediately start the release phase then move the voice to off
     voice->hw_cfg_fmt &= ~((uint32_t)NV_PAVS_VOICE_CFG_FMT_PERSIST);
 
-    wait_for_pio_available(4);
+    wait_for_pio_available(5);
     KIRQL irql = KeRaiseIrqlToDpcLevel();
+
+    g_running_voices[voice->voice_index] = NULL;
+
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice->voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_FMT, voice->hw_cfg_fmt);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_OFF, voice->voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
     KfLowerIrql(irql);
-
-    return true;
-}
-
-void nxAudioVoiceDestroy (nxAudioVoice *voice)
-{
-    if (!voice) {
-        return;
-    }
-
-    nxAudioVoicePause(voice);
-
-    const uint16_t voice_index = voice->voice_index;
-
-    KIRQL irql = KeRaiseIrqlToDpcLevel();
-    g_running_voices[voice_index] = NULL;
-    const uint32_t notifier_index = MCPX_HW_NOTIFIER_BASE_OFFSET + (voice_index * MCPX_HW_NOTIFIER_COUNT);
-    g_notifier_array[notifier_index + 0].status = NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS;
-    g_notifier_array[notifier_index + 1].status = NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS;
-    KfLowerIrql(irql);
-
-    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_OFF, voice_index);
 
     if (voice->currentBuffer[0]) {
         MmLockUnlockBufferPages(voice->currentBuffer[0]->buffer, voice->currentBuffer[0]->size_bytes, TRUE);
@@ -1013,6 +1103,28 @@ void nxAudioVoiceDestroy (nxAudioVoice *voice)
     voice->currentBufferIndex = 0;
     voice->paused = false;
 
+    return true;
+}
+
+bool nxAudioVoiceIsPlaying (nxAudioVoice *voice)
+{
+    if (!voice) {
+        return false;
+    }
+
+    const uint32_t next_voice =
+        g_voice_array[voice->voice_index].tar_pitch_link & NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE;
+    return next_voice != voice->voice_index;
+}
+
+void nxAudioVoiceDestroy (nxAudioVoice *voice)
+{
+    if (!voice) {
+        return;
+    }
+
+    nxAudioVoiceStop(voice);
+
     voice_free(voice->voice_index);
 }
 
@@ -1024,9 +1136,11 @@ bool nxAudioVoicePause (nxAudioVoice *voice)
     }
 
     if (!voice->paused) {
-        const uint16_t voice_index = voice->voice_index;
-        apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_PAUSE, voice_index | NV1BA0_PIO_VOICE_PAUSE_ACTION);
+        wait_for_pio_available(1);
+        KIRQL irql = KeRaiseIrqlToDpcLevel();
+        apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_PAUSE, voice->voice_index | NV1BA0_PIO_VOICE_PAUSE_ACTION);
         voice->paused = true;
+        KfLowerIrql(irql);
     }
 
     return true;
@@ -1080,18 +1194,19 @@ bool nxAudioVoiceSetPitch (nxAudioVoice *voice, float pitch_multiplier)
         set_last_error(NX_AUDIO_ERR_INVALID_PARAM);
         return false;
     }
-    // Calculate effective sample rate
-    const float effective_sample_rate = (float)voice->format.sampleRate * pitch_multiplier;
 
-    // Calculate hardware pitch value
+    const float effective_sample_rate = (float)voice->format.sampleRate * pitch_multiplier;
     const int32_t pitch_val = convert_sample_rate_to_pitch_value(effective_sample_rate);
-    const uint32_t tar_pitch_link = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH, (uint32_t)(int16_t)pitch_val) |
-                                    APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE, 0x0000);
 
     wait_for_pio_available(4);
     KIRQL irql = KeRaiseIrqlToDpcLevel();
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice->voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
+
+    uint32_t old_link = g_voice_array[voice->voice_index].tar_pitch_link & 0x0000FFFF;
+    const uint32_t tar_pitch_link = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH, (uint32_t)(int16_t)pitch_val) |
+                                    APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE, old_link);
+
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_TAR_PITCH, tar_pitch_link);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
     voice->pitch_multiplier = pitch_multiplier;
@@ -1100,7 +1215,7 @@ bool nxAudioVoiceSetPitch (nxAudioVoice *voice, float pitch_multiplier)
     return true;
 }
 
-bool nxAudioVoiceSetAdsr (nxAudioVoice *voice, const nxAudioAdsr *adsr)
+bool nxAudioVoiceSetAmplitudeEnvelope (nxAudioVoice *voice, const nxAudioAdsr *adsr)
 {
     if (!voice || !adsr) {
         set_last_error(NX_AUDIO_ERR_INVALID_PARAM);
@@ -1108,25 +1223,28 @@ bool nxAudioVoiceSetAdsr (nxAudioVoice *voice, const nxAudioAdsr *adsr)
     }
 
     voice->adsr = *adsr;
-    const uint32_t cfg_env0 = APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENV0_EA_ATTACKRATE, adsr->attackTime) |
-                              APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENV0_EA_DELAYTIME, adsr->delayTime);
 
-    const uint32_t cfg_enva = APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_DECAYRATE, adsr->decayTime) |
-                              APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_HOLDTIME, adsr->holdTime) |
-                              APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_SUSTAINLEVEL, adsr->sustainLevel);
+    voice->hw_cfg_env0 =
+        (voice->hw_cfg_env0 & ~(NV_PAVS_VOICE_CFG_ENV0_EA_ATTACKRATE | NV_PAVS_VOICE_CFG_ENV0_EA_DELAYTIME)) |
+        APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENV0_EA_ATTACKRATE, adsr->attackTime) |
+        APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENV0_EA_DELAYTIME, adsr->delayTime);
 
-    const uint32_t tar_lfo_env = APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_LFO_ENV_EA_RELEASERATE, adsr->releaseTime);
+    voice->hw_cfg_enva = APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_DECAYRATE, adsr->decayTime) |
+                         APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_HOLDTIME, adsr->holdTime) |
+                         APU_MAKE_VALUE(NV_PAVS_VOICE_CFG_ENVA_EA_SUSTAINLEVEL, adsr->sustainLevel);
 
-    wait_for_pio_available(5);
+    voice->hw_tar_lfo_env = (voice->hw_tar_lfo_env & ~NV_PAVS_VOICE_TAR_LFO_ENV_EA_RELEASERATE) |
+                            APU_MAKE_VALUE(NV_PAVS_VOICE_TAR_LFO_ENV_EA_RELEASERATE, adsr->releaseTime);
+
+    voice->hw_voice_on_flags |= APU_MAKE_VALUE(NV1BA0_PIO_VOICE_ON_ENVA, NV_PAVS_VOICE_PAR_STATE_EFCUR_DELAY);
+
+    wait_for_pio_available(6);
     KIRQL irql = KeRaiseIrqlToDpcLevel();
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_CURRENT_VOICE, voice->voice_index);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 1);
-    // ENVA points to the start of a state-machine. Always start on delay. If user provides no delay it skips anyway
-    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_ON,
-                  voice->voice_index | APU_MAKE_VALUE(NV1BA0_PIO_VOICE_ON_ENVA, NV_PAVS_VOICE_PAR_STATE_EFCUR_DELAY));
-    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_ENV0, cfg_env0);
-    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_ENVA, cfg_enva);
-    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_LFO_ENV, tar_lfo_env);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_ENV0, voice->hw_cfg_env0);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_CFG_ENVA, voice->hw_cfg_enva);
+    apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_SET_VOICE_LFO_ENV, voice->hw_tar_lfo_env);
     apu_write_reg(APU_VP_OFFSET + NV1BA0_PIO_VOICE_LOCK, 0);
     KfLowerIrql(irql);
     return true;

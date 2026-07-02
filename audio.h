@@ -54,31 +54,32 @@ typedef struct nxAudioBuffer
 } nxAudioBuffer;
 
 /**
- * Hardware ADSR Envelope State Machine
+ * @brief ADSR Envelope parameters.
+ * Time values are specified in units of 512 samples.
+ * At a 48,000 Hz sample rate, 1 unit (512 samples) is approximately 10.66 milliseconds.
  *
- * Volume
- *   ^
- *   |               (3) HOLD
- * P |             +----------+
- * E |            /            \      (4) DECAY
- * A |           /              \
- * K |          /                +-----------------------+ (5) SUSTAIN (INDEFINITLY UNTIL VOICE OFF)
- *   |         /                 |                       |\
- *   | (2) ATTACK                |                       | \ (7) RELEASE (AFTER VOICE OFF COMMAND)
- *   |       /                   |                       |  \
- *   |      /                    |                       |   \
- *   |     /                     |                       |    \
- * 0 +----+----------------------+-----------------------+-----+----> Time
- *   (1) DELAY                                             (0) OFF
+ *                            HOLD
+ *                   +---------------------+
+ *                  /|                     |\
+ *          ATTACK / |                     | \ DECAY
+ *                /  |                     |  \    SUSTAIN LEVEL
+ *               /   |                     |   +-------------------+
+ *              /    |                     |   |                   |\
+ *             /     |                     |   |                   | \
+ *            /      |                     |   |                   |  \  RELEASE
+ *           /       |                     |   |                   |   \
+ *          /        |                     |   |                   |    \
+ * 0 ------+---------+---------------------+---+-------------------+-----+----> Time
+ *   DELAY
  */
 typedef struct
 {
-    uint32_t delayTime;    // Count of 512-sample blocks to delay before attack (0-8191)
-    uint32_t attackTime;   // Attack segment length, in 512-sample blocks (0-8191)
-    uint32_t holdTime;     // Count of 512-sample blocks to hold after attack (0-8191)
-    uint32_t decayTime;    // Decay segment length, in 512-sample blocks (0-8191)
-    uint32_t sustainLevel; // Sustain level (0-255)
-    uint32_t releaseTime;  // Release segment length, in 512-sample blocks (0-8191)
+    uint32_t delayTime;    // Delay before the attack phase, in 512-sample units (0-8191)
+    uint32_t attackTime;   // Duration of the attack phase, in 512-sample units (0-8191)
+    uint32_t holdTime;     // Duration of the hold phase, in 512-sample units (0-8191)
+    uint32_t decayTime;    // Duration of the decay phase, in 512-sample units (0-8191)
+    uint32_t sustainLevel; // Sustain level (u.8 format: 0 to 255). 255 = 100% level
+    uint32_t releaseTime;  // Duration of the release phase, in 512-sample units (0-8191)
 } nxAudioAdsr;
 
 typedef struct nxAudioVoice
@@ -93,6 +94,11 @@ typedef struct nxAudioVoice
     float pitch_multiplier;
     nxAudioAdsr adsr;
     uint32_t hw_cfg_fmt;
+    uint32_t hw_voice_on_flags;
+    uint32_t hw_cfg_env0;
+    uint32_t hw_cfg_enva;
+    uint32_t hw_cfg_misc;
+    uint32_t hw_tar_lfo_env;
     uint8_t currentBufferIndex;
     uint8_t voice_index;
 } nxAudioVoice;
@@ -152,13 +158,26 @@ void nxAudioVoiceDestroy (nxAudioVoice *voice);
 bool nxAudioVoiceStart (nxAudioVoice *voice);
 
 /**
- * @brief Stopping a voice will start a voice off decay set by the ADSR. If the ADSR is not set then the voice will be
- * stopped immediately. If you want to stop a voice immediately, call nxAudioVoicePause() before calling
- * nxAudioVoiceStop()
+ * @brief Releasing a voice will start a voice off decay set by the ADSR. If the ADSR is not set then the voice will be
+ * stopped immediately.
  * @param voice Pointer to the audio voice to stop.
  * @return true if playback was successfully stopped, false otherwise.
  */
+bool nxAudioVoiceRelease (nxAudioVoice *voice);
+
+/**
+ * @brief Immediately stops the voice from playing and removes it from the active hardware list.
+ * @param voice Pointer to the audio voice to stop.
+ * @return true if the command was successfully sent.
+ */
 bool nxAudioVoiceStop (nxAudioVoice *voice);
+
+/**
+ * @brief Checks if the audio voice is currently actively playing.
+ * @param voice Pointer to the audio voice.
+ * @return true if playing, false otherwise.
+ */
+bool nxAudioVoiceIsPlaying (nxAudioVoice *voice);
 
 /**
  * @brief Pausing a voice will stop the hardware from accessing the buffer but will not change any hardware voice
@@ -191,7 +210,7 @@ bool nxAudioVoiceSetPitch (nxAudioVoice *voice, float pitch_multiplier);
  * @param adsr Pointer to the ADSR configuration structure.
  * @return true if the envelope was successfully updated, false otherwise.
  */
-bool nxAudioVoiceSetAdsr (nxAudioVoice *voice, const nxAudioAdsr *adsr);
+bool nxAudioVoiceSetAmplitudeEnvelope (nxAudioVoice *voice, const nxAudioAdsr *adsr);
 
 nxAudioResult nxAudioGetLastError (void);
 
