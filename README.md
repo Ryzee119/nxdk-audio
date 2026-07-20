@@ -64,6 +64,12 @@ add_subdirectory(nxdk-audio)
 target_link_libraries(my_game_target PRIVATE nxaudio)
 ```
 
+## TODO
+* [ ] Reverb hardware effects (Or just more DSP effects)
+* [ ] Direct 5.1 surround
+* [ ] More HRTF validation
+* [ ] More user configuration (Configurable voice count etc to reduce RAM usage)
+
 ## Attribution
 * https://xboxdevwiki.net/APU
 * https://xemu.app/
