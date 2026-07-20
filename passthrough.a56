@@ -1,0 +1,144 @@
+; SPDX-License-Identifier: MIT
+; SPDX-FileCopyrightText: 2026 Ryan Wendland
+
+DSP_REG_YIELD            equ $FFFFC4
+DSP_IRQ_STATUS           equ $FFFFC5
+DSP_IRQ_ABORT_FRAME_BIT  equ $00
+DSP_IRQ_ABORT_FRAME_MASK equ $00
+DSP_IRQ_START_FRAME_BIT  equ $01
+DSP_IRQ_START_FRAME_MASK equ $02
+DSP_IRQ_DMA_EOL_BIT      equ $07
+DSP_IRQ_DMA_EOL_MASK     equ $80
+
+DMA_NEXT_BLOCK           equ $FFFFD4
+DMA_START_BLOCK          equ $FFFFD5
+DMA_CONTROL              equ $FFFFD6
+DMA_CONTROL_ABORT        equ $05
+DMA_CONTROL_UNFREEZE     equ $04
+DMA_CONTROL_FREEZE       equ $03
+DMA_CONTROL_STOP         equ $02
+DMA_CONTROL_START        equ $01
+
+DMA_MAP_XMEM             equ $0000
+DMA_MAP_YMEM             equ $1800
+DMA_MAP_PMEM             equ $2800
+
+MIXBIN_BASE_ADDR         equ $1400
+MIXBIN_FRONT_LEFT        equ (MIXBIN_BASE_ADDR + $00)  ; 0 * $20
+MIXBIN_FRONT_RIGHT       equ (MIXBIN_BASE_ADDR + $20)  ; 1 * $20
+MIXBIN_CENTER            equ (MIXBIN_BASE_ADDR + $40)  ; 2 * $20
+MIXBIN_LFE               equ (MIXBIN_BASE_ADDR + $60)  ; 3 * $20
+MIXBIN_REAR_LEFT         equ (MIXBIN_BASE_ADDR + $80)  ; 4 * $20
+MIXBIN_REAR_RIGHT        equ (MIXBIN_BASE_ADDR + $A0)  ; 5 * $20
+
+MIXBIN_HRTF_6            equ (MIXBIN_BASE_ADDR + $C0)  ; 6 * $20 (FRONT LEFT)
+MIXBIN_HRTF_7            equ (MIXBIN_BASE_ADDR + $E0)  ; 7 * $20 (FRONT RIGHT)
+MIXBIN_HRTF_8            equ (MIXBIN_BASE_ADDR + $100) ; 8 * $20 (BACK LEFT)
+MIXBIN_HRTF_9            equ (MIXBIN_BASE_ADDR + $120) ; 9 * $20 (BACK RIGHT)
+
+; Variables
+org x:$0100
+dma_node0                ds 7
+
+; Program memory. Reset vector is at $000000
+org p:$000000
+_start
+    ; Flush all pending interrupt bits
+    movep #$000FFF, x:DSP_IRQ_STATUS
+
+    ; First thing we do is set up the DMA control block. This is 7 words,
+    ; and we set up where to read the audio data from and where to output it.
+    ; Our setup will read data from MIXBIN 0 and MIXBIN 1 (Front left and front right)
+    ; and output it to GP OUT FIFO 0 (Set up in nxdk audio driver) for consumption by AC97.
+    ; Ref https://xboxdevwiki.net/DSP#Command_blocks
+    
+    ; word0 = next block linkage
+    ; We link back to itself, but also set the end of list bit ($4000)
+    move #>(dma_node0+$4000), x0
+    move x0, x:dma_node0+0
+
+    ; word1 = control word
+    ; This DMA is set up to read from MIXBIN 0 and MIXBIN 1 (Front Left and Front Right)
+    ; and output a 16-bit stereo interleaved PCM stream for AC97.
+    ;   Bits 14-27 : 32  (How many samples the DMA increments per read)
+    ;   Bit  13    : 0   (?) r
+    ;   Bits 10-12 : 1   (0 = 8-bit, 1 = 16-bit, 2 = 24-bit (padded to 4 bytes), 3 = 32-bit)
+    ;   Bit  9     : 0   (?)
+    ;   Bits 5-8   : 0   (Buffer ID = 0, meaning FIFO 0)
+    ;   Bit  4     : 0   (Enable Scratch offset writeback (To word 4))
+    ;   Bits 2-3   : 0   (?)
+    ;   Bit  1     : 1   (Direction. 1 = Write to RAM, 0 = Read from RAM)
+    ;   Bit  0     : 1   (0 = linear, 1 = interleaved incoming data)
+    move #>$080403, x0
+    move x0, x:dma_node0+1
+
+    ; word2 = count
+    ;   Bits 12:4  : 32  (block_count)
+    ;   Bits 3:0   : 1   (0 = 1 channel, 1 = 2 channels, etc.)
+    move #>$000201, x0
+    move x0, x:dma_node0+2
+
+    ; word3 = Raw DSP memory offset
+    move #MIXBIN_BASE_ADDR, x0
+    move x0, x:dma_node0+3
+
+    ; word4, 5, 6 (Unused - Clear them out)
+    move #>$000000, x0     
+    move x0, x:dma_node0+4
+    move x0, x:dma_node0+5
+    move x0, x:dma_node0+6
+
+    ; Stop our DMA from starting
+    movep #DMA_CONTROL_STOP, x:DMA_CONTROL
+
+    ; Prep our DMA list to point to our node
+    movep #dma_node0, x:DMA_START_BLOCK
+    movep #dma_node0, x:DMA_NEXT_BLOCK
+
+_audio_loop
+    ; Assert bit to inform VP we are idle? Not 100% sure
+    movep #$000001, x:DSP_REG_YIELD
+
+    ; Wait for a frame start; this occurs when VP has finished filling the MIXBIN
+    _wait_for_frame
+        jclr #DSP_IRQ_START_FRAME_BIT, x:DSP_IRQ_STATUS, _wait_for_frame
+        movep #DSP_IRQ_START_FRAME_MASK, x:DSP_IRQ_STATUS
+
+    ; Mix HRTF bins (6, 8 -> 0) and (7, 9 -> 1)
+    move #MIXBIN_FRONT_LEFT, r0
+    move #MIXBIN_HRTF_6, r1
+    move #MIXBIN_HRTF_8, r2
+    do #32, _mix_left
+        move x:(r1)+, a
+        move x:(r2)+, b
+        add b, a
+        move x:(r0), b
+        add b, a
+        move a, x:(r0)+
+        _mix_left
+
+    move #MIXBIN_FRONT_RIGHT, r0
+    move #MIXBIN_HRTF_7, r1
+    move #MIXBIN_HRTF_9, r2
+    do #32, _mix_right
+        move x:(r1)+, a
+        move x:(r2)+, b
+        add b, a
+        move x:(r0), b
+        add b, a
+        move a, x:(r0)+
+        _mix_right
+
+    ; Pre-clear any pending DMA EOL interrupt before triggering (avoids false positive in wait loop)
+    movep #DSP_IRQ_DMA_EOL_MASK, x:DSP_IRQ_STATUS
+
+    ; Update NEXT_BLOCK to point to our DMA node and issue START
+    movep #dma_node0, x:DMA_NEXT_BLOCK
+    movep #DMA_CONTROL_START, x:DMA_CONTROL
+
+    ; Wait for DMA completion
+    _wait_dma_eol
+        jclr #DSP_IRQ_DMA_EOL_BIT, x:DSP_IRQ_STATUS, _wait_dma_eol
+        movep #DSP_IRQ_DMA_EOL_MASK, x:DSP_IRQ_STATUS
+
+    jmp _audio_loop

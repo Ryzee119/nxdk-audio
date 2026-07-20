@@ -1,0 +1,30 @@
+name: Build
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build with NXDK Docker
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace -w /workspace \
+            ghcr.io/xboxdev/nxdk:latest \
+            sh -c "apk add --no-cache git bison flex bash && \
+                  git config --global --add safe.directory /workspace && \
+                  mkdir -p build && cd build && \
+                  cmake .. -DCMAKE_TOOLCHAIN_FILE=/usr/src/nxdk/share/toolchain-nxdk.cmake -DCMAKE_BUILD_TYPE=Release && \
+                  cmake --build ."
+
+      - name: Upload Example ISOs
+        uses: actions/upload-artifact@v7
+        with:
+          name: example-isos
+          path: build/*.iso
