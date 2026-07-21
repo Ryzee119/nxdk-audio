@@ -23,6 +23,7 @@ nxAudioVoice *g_tracked_voices[MCPX_HW_MAX_VOICES];
 uint32_t g_voice_allocation_mask[(MCPX_HW_MAX_VOICES + 31) / 32];
 static KINTERRUPT g_apu_interrupt;
 static KDPC g_apu_dpc;
+static bool g_isr_dpc_initialized = false;
 static ac97_descriptor_t spdif_output_descriptor[1];
 static ac97_descriptor_t pcm_output_descriptor[1];
 
@@ -582,6 +583,7 @@ bool nxAudioInit (const nxAudioInitParams *parameters)
     KeInitializeDpc(&g_apu_dpc, apu_dpc, NULL);
     KeInitializeInterrupt(&g_apu_interrupt, &apu_isr, NULL, vector, irql, LevelSensitive, TRUE);
     KeConnectInterrupt(&g_apu_interrupt);
+    g_isr_dpc_initialized = true;
 
     // Start the Sound Engine
     apu_write_reg(NV_PAPU_SECTL, 0x0000000F);
@@ -604,8 +606,11 @@ void nxAudioShutdown (void)
     apu_write_reg(NV_PAPU_FECTL, 0);
     apu_write_reg(NV_PAPU_SECTL, 0);
 
-    KeDisconnectInterrupt(&g_apu_interrupt);
-    KeRemoveQueueDpc(&g_apu_dpc);
+    if (g_isr_dpc_initialized) {
+        KeDisconnectInterrupt(&g_apu_interrupt);
+        KeRemoveQueueDpc(&g_apu_dpc);
+        g_isr_dpc_initialized = false;
+    }
 
     apu_write_reg(APU_GP_OFFSET + NV_PAPU_GPRST, 0x00000000);
     apu_write_reg(APU_EP_OFFSET + NV_PAPU_GPRST, 0x00000000);
