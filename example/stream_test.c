@@ -25,10 +25,10 @@ static const uint8_t steam_wav[] = {
 #embed "assets/adpcm_stereo.wav"
 };
 
-static const uint8_t *find_chunk (const uint8_t *riff_data, const char *magic, uint32_t *out_size)
+static const uint8_t *find_chunk (const uint8_t *riff_data, uint32_t riff_size, const char *magic, uint32_t *out_size)
 {
     const uint8_t *chunk = riff_data + 12;
-    while (1) {
+    while (chunk + 8 <= riff_data + riff_size) {
         uint32_t chunk_size = *(uint32_t *)(chunk + 4);
         if (memcmp(chunk, magic, 4) == 0) {
             if (out_size) {
@@ -41,6 +41,7 @@ static const uint8_t *find_chunk (const uint8_t *riff_data, const char *magic, u
             chunk++;
         }
     }
+    return NULL;
 }
 
 typedef struct
@@ -95,9 +96,15 @@ int main (void)
     }
 
     uint32_t fmt_size = 0;
-    const uint8_t *fmt_chunk = find_chunk(steam_wav, "fmt ", &fmt_size);
+    const uint8_t *fmt_chunk = find_chunk(steam_wav, sizeof(steam_wav), "fmt ", &fmt_size);
     uint32_t data_size = 0;
-    const uint8_t *data_chunk = find_chunk(steam_wav, "data", &data_size);
+    const uint8_t *data_chunk = find_chunk(steam_wav, sizeof(steam_wav), "data", &data_size);
+
+    if (!fmt_chunk || !data_chunk) {
+        DbgPrint("Invalid WAV file\n");
+        nxAudioShutdown();
+        return -1;
+    }
 
     uint16_t format_tag = *(uint16_t *)(fmt_chunk);
     uint16_t channels = *(uint16_t *)(fmt_chunk + 2);
@@ -128,6 +135,11 @@ int main (void)
 
     for (int i = 0; i < NUM_BUFFERS; i++) {
         ctx.data[i] = (uint8_t *)MmAllocateContiguousMemory(CHUNK_BYTES);
+        if (!ctx.data[i]) {
+            DbgPrint("Failed to allocate buffer memory\n");
+            nxAudioShutdown();
+            return -1;
+        }
         fill_wav_chunk(&ctx, ctx.data[i], CHUNK_BYTES);
         nxAudioBufferInitialize(&ctx.buffers[i], ctx.data[i], CHUNK_BYTES);
         nxAudioBufferQueue(&voice, &ctx.buffers[i]);
@@ -179,7 +191,9 @@ int main (void)
     nxAudioVoiceDestroy(&voice);
 
     for (int i = 0; i < NUM_BUFFERS; i++) {
-        MmFreeContiguousMemory(ctx.data[i]);
+        if (ctx.data[i]) {
+            MmFreeContiguousMemory(ctx.data[i]);
+        }
     }
 
     nxAudioShutdown();
