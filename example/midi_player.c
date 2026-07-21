@@ -51,6 +51,10 @@ static void generate_instrument_samples (tsf *soundfont)
     debugPrint("Generating Instruments");
     for (int prog = 0; prog < 128; prog++) {
         instrument_data[prog] = (int16_t *)MmAllocateContiguousMemory(WAVETABLE_SAMPLES * sizeof(int16_t));
+        if (!instrument_data[prog]) {
+            debugPrint("Out of memory for instrument %d\n", prog);
+            continue;
+        }
 
         tsf_reset(soundfont);
         tsf_set_output(soundfont, TSF_MONO, SAMPLE_RATE, 0.0f);
@@ -77,6 +81,10 @@ static void generate_drum_samples (tsf *soundfont)
     for (int key = DRUM_KEY_MIN; key <= DRUM_KEY_MAX; key++) {
         int idx = key - DRUM_KEY_MIN;
         drum_data[idx] = (int16_t *)MmAllocateContiguousMemory(DRUM_SAMPLES * sizeof(int16_t));
+        if (!drum_data[idx]) {
+            debugPrint("Out of memory for drum %d\n", key);
+            continue;
+        }
 
         tsf_reset(soundfont);
         tsf_set_output(soundfont, TSF_MONO, SAMPLE_RATE, 0.0f);
@@ -222,7 +230,6 @@ int main (void)
 
                     nxAudioBuffer *buf;
                     float base_pitch;
-                    bool loop;
 
                     if (ch == 9) {
                         // Drum channel — use drum one-shot
@@ -239,6 +246,10 @@ int main (void)
                         // Melodic — use instrument one-shot (rendered at Middle C, Note 60)
                         buf = &instrument_buffers[channels[ch].program];
                         base_pitch = powf(2.0f, (msg->key - 60) / 12.0f);
+                    }
+
+                    if (!buf->buffer) {
+                        goto note_off;
                     }
 
                     voice_info[free_idx].note = msg->key;
@@ -284,10 +295,14 @@ int main (void)
     tml_free(midi);
 
     for (int i = 0; i < 128; i++) {
-        MmFreeContiguousMemory(instrument_data[i]);
+        if (instrument_data[i]) {
+            MmFreeContiguousMemory(instrument_data[i]);
+        }
     }
     for (int i = 0; i < DRUM_KEY_COUNT; i++) {
-        MmFreeContiguousMemory(drum_data[i]);
+        if (drum_data[i]) {
+            MmFreeContiguousMemory(drum_data[i]);
+        }
     }
 
     nxAudioShutdown();
