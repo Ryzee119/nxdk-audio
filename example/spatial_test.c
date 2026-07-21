@@ -54,6 +54,11 @@ int main (void)
     nxAudioVoiceSetLooping(&voice, true);
 
     int16_t *noise_data = (int16_t *)MmAllocateContiguousMemory(CHUNK_SAMPLES * sizeof(int16_t));
+    if (!noise_data) {
+        debugPrint("Failed to allocate noise data\n");
+        nxAudioShutdown();
+        return -1;
+    }
     fill_noise_chunk(noise_data, CHUNK_SAMPLES);
 
     nxAudioBuffer buffer;
@@ -198,7 +203,9 @@ int main (void)
     nxAudioVoiceStop(&voice);
     nxAudioVoiceDestroy(&voice);
 
-    MmFreeContiguousMemory(noise_data);
+    if (noise_data) {
+        MmFreeContiguousMemory(noise_data);
+    }
 
     nxAudioShutdown();
 
