@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 Ryzee119
-#include <nxaudio.h>
 #include "audio_internal.h"
+#include <nxaudio.h>
 
 void apu_sge_free (uint32_t sge_index, uint32_t sge_count);
 static int32_t apu_sge_alloc (uint32_t count);
@@ -87,8 +87,8 @@ static bool insert_buffer_to_ssl (nxAudioVoice *voice, const nxAudioBuffer *buff
 
     while (bytes_left > 0) {
         if (index >= MCPX_HW_MAX_PRD_ENTRIES_PER_SSL) {
-            debugPrint("nxAudio Error: SSL limit exceeded!, %d/%d\n", index, MCPX_HW_MAX_PRD_ENTRIES_PER_SSL);
-            break;
+            apu_set_last_error(NX_AUDIO_ERR_OUT_OF_MEMORY);
+            return false;
         }
 
         // Each SSL entry can be up to 65535 samples and it must be divided into block of contigous memory (if
