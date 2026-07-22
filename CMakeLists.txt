@@ -1,8 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-set(XBE_TITLE nxdk-audio)
-set(XBOX_ISO_DIR ${CMAKE_CURRENT_BINARY_DIR}/xiso)
-
-project(${XBE_TITLE} C)
+project(nxdk-audio C)
 
 # 1. Define common strict warnings for all languages
 set(COMMON_WARNINGS "-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wconversion -Wsign-conversion -Wcast-align -Wdouble-promotion")
@@ -22,8 +19,8 @@ ExternalProject_Get_Property(a56_tool SOURCE_DIR)
 set(A56_EXE ${SOURCE_DIR}/a56)
 
 add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/passthrough.out
-    COMMAND bash "-c" "${A56_EXE} -o ${CMAKE_CURRENT_BINARY_DIR}/passthrough.out ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.a56 | tail -n 2"
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.out
+    COMMAND bash "-c" "${A56_EXE} -o ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.out ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.a56 | tail -n 2"
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.a56
     COMMENT "Compiling DSP code: passthrough.a56 -> passthrough.out"
     VERBATIM
@@ -36,7 +33,7 @@ separate_arguments(COMMON_WARNINGS)
 target_compile_options(nxaudio PRIVATE ${COMMON_WARNINGS})
 
 target_include_directories(nxaudio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set_property(SOURCE audio_buffer.c audio_core.c audio_voice.c APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/passthrough.out")
+set_property(SOURCE audio_buffer.c audio_core.c audio_voice.c APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/passthrough.out")
 
 option(NXAUDIO_BUILD_EXAMPLES "Build example applications" ON)
 
