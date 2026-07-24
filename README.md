@@ -64,6 +64,10 @@ add_subdirectory(nxdk-audio)
 target_link_libraries(my_game_target PRIVATE nxaudio)
 ```
 
+## Dependencies
+Building `nxdk-audio` requires `cargo` (the Rust package manager) to be installed on your system. The build process automatically installs the [`dsp56300-asm`](https://crates.io/crates/dsp56300-asm) crate for assembling the DSP code.
+
+
 ## TODO
 * [ ] Reverb hardware effects (Or just more DSP effects)
 * [ ] Direct 5.1 surround
@@ -75,3 +79,4 @@ target_link_libraries(my_game_target PRIVATE nxaudio)
 * https://xemu.app/
 * https://www.sonicom.eu/tools-and-resources/hrtf-dataset/ (HRTF dataset CC BY 4.0) 
 * https://github.com/Ryzee119/xbox-apu-hrtf
+* https://github.com/mborgerson/dsp56300 (DSP56300 Assembler)

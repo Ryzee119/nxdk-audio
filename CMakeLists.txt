@@ -4,30 +4,27 @@ project(nxdk-audio C)
 # 1. Define common strict warnings for all languages
 set(COMMON_WARNINGS "-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wconversion -Wsign-conversion -Wcast-align -Wdouble-promotion")
 
-include(ExternalProject)
-ExternalProject_Add(
-    a56_tool
-    GIT_REPOSITORY https://github.com/XboxDev/a56.git
-    UPDATE_COMMAND ""
-    CONFIGURE_COMMAND ""
-    BUILD_IN_SOURCE 1
-    BUILD_COMMAND make -j1 "CC=cc -std=gnu89 -w" "HOSTCC=cc -std=gnu89 -w"
-    INSTALL_COMMAND ""
+set(DSP56300_ASM_EXE ${CMAKE_CURRENT_BINARY_DIR}/cargo/bin/dsp56300-asm)
+
+add_custom_command(
+    OUTPUT ${DSP56300_ASM_EXE}
+    COMMAND cargo install dsp56300-asm --locked --root ${CMAKE_CURRENT_BINARY_DIR}/cargo
+    COMMENT "Installing dsp56300-asm crate"
+    VERBATIM
 )
 
-ExternalProject_Get_Property(a56_tool SOURCE_DIR)
-set(A56_EXE ${SOURCE_DIR}/a56)
+add_custom_target(dsp56300_asm_tool DEPENDS ${DSP56300_ASM_EXE})
 
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.out
-    COMMAND bash "-c" "${A56_EXE} -o ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.out ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.a56 | tail -n 2"
+    COMMAND bash "-c" "${DSP56300_ASM_EXE} -f lod -o ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.out ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.a56"
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/passthrough.a56
     COMMENT "Compiling DSP code: passthrough.a56 -> passthrough.out"
     VERBATIM
 )
 
 add_library(nxaudio STATIC audio_buffer.c audio_core.c audio_voice.c)
-add_dependencies(nxaudio a56_tool)
+add_dependencies(nxaudio dsp56300_asm_tool)
 
 separate_arguments(COMMON_WARNINGS)
 target_compile_options(nxaudio PRIVATE ${COMMON_WARNINGS})
